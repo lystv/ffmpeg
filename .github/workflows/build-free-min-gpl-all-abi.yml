@@ -182,6 +182,119 @@ jobs:
             git archive FETCH_HEAD | tar -x || true
           fi
 
+      - name: 'Build free-min-gpl variant (all ABIs: armeabi-v7a, v7a-neon, arm64-v8a, x86, x86_64)'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          touch build.log
+          set +e
+          ./android.sh --enable-gpl --enable-libvidstab --enable-x264 --enable-x265 --enable-xvidcore \
+            --enable-android-media-codec --enable-android-zlib
+          BUILD_EXIT=$?
+          exit "$BUILD_EXIT"
+
+      - name: Print build log on failure
+        if: failure() || cancelled()
+        run: cat build.log || true
+
+      - name: Print ffbuild config log on failure
+        if: failure() || cancelled()
+        run: '[[ -f ./src/ffmpeg/ffbuild/config.log ]] && tail -100 ./src/ffmpeg/ffbuild/config.log || true'
+
+      - name: The NDK in use is the one this line declares
+        run: python3 ../tools/check-ndk.py
+
+      - name: The security patches are in this build
+        run: python3 ../tools/check-security-patches.py
+
+      - name: The native libraries can be loaded (16 KB pages, RELRO)
+        run: python3 ../tools/check-elf-16kb.py prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar
+
+      - name: 'Verify tier content matches min-gpl exactly (binary check)'
+        run: |
+          set -e
+          fail=0
+          for term in tesseract leptonica chromaprint whisper ggml libass rubberband; do
+            hits=$(grep -a -il -- "$term" $(find prebuilt -name "*.so") 2>/dev/null || true)
+            if [[ -n "$hits" ]]; then
+              echo "::error::found '$term' in: $hits (must not be in min-gpl)"
+              fail=1
+            else
+              echo "OK: '$term' absent"
+            fi
+          done
+          for symbol in lame_init opus_encode gnutls_init gnutls_handshake; do
+            hits=$(grep -a -il -- "$symbol" $(find prebuilt -name "*.so") 2>/dev/null || true)
+            if [[ -n "$hits" ]]; then
+              echo "::error::found symbol '$symbol' in: $hits (must not be in min-gpl)"
+              fail=1
+            else
+              echo "OK: '$symbol' absent"
+            fi
+          done
+          if find prebuilt -iname "*whisper*" | grep -q .; then
+            echo "::error::a libwhisperkit*.so file is present"
+            fail=1
+          fi
+          for term in x264 x265 xvid vidstab; do
+            hits=$(grep -a -il -- "$term" $(find prebuilt -name "*.so") 2>/dev/null || true)
+            if [[ -z "$hits" ]]; then
+              echo "::error::'$term' not found — min-gpl build is incomplete"
+              fail=1
+            else
+              echo "OK: '$term' present in: $hits"
+            fi
+          done
+          hits=$(grep -a -il -- "mediacodec" $(find prebuilt -name "*.so") 2>/dev/null || true)
+          if [[ -z "$hits" ]]; then
+            echo "::error::'mediacodec' not found — min-gpl build is incomplete"
+            fail=1
+          else
+            echo "OK: 'mediacodec' present in: $hits"
+          fi
+          exit "$fail"
+
+      - name: Upload AAR artifact (all ABIs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-kit-free-min-gpl-all-abis
+          path: android-6.0-lts/prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar
+          retention-days: 3
+
+      - name: Install Android platform 35
+        run: |
+          set +o pipefail
+          yes | "${ANDROID_HOME}"/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          set -o pipefail
+          "${ANDROID_HOME}"/cmdline-tools/latest/bin/sdkmanager "platforms;android-35"
+
+      - name: Cache Android NDK r26c
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ~/.ndk
+          key: ndk-r26c-linux
+
+      - name: Download Android NDK r26c
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${HOME}/.ndk"
+          curl -s "https://dl.google.com/android/repository/android-ndk-r26c-linux.zip" -o ndk.zip
+          unzip -q -o ndk.zip -d "${HOME}/.ndk"
+          rm -f ndk.zip
+
+      - name: Export ANDROID_NDK_ROOT
+        run: |
+          NDK_DIR=$(ls -d "${HOME}/.ndk"/android-ndk-* | head -n 1)
+          echo "ANDROID_NDK_ROOT=${NDK_DIR}" >> "$GITHUB_ENV"
+
+      - name: Restore latest build checkpoint from ci-cache-free-min-gpl branch
+        run: |
+          if git ls-remote --exit-code --heads origin ci-cache-free-min-gpl >/dev/null 2>&1; then
+            git fetch --depth=1 origin ci-cache-free-min-gpl
+            git archive FETCH_HEAD | tar -x || true
+          fi
+
       - name: "Build free-min-gpl variant (all ABIs: armeabi-v7a, v7a-neon, arm64-v8a, x86, x86_64)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
